@@ -39,15 +39,26 @@ export class CryptoService {
 
   async verifyWalletSignature(message: string, signature: string, expectedAddress: string): Promise<boolean> {
     try {
+      console.log("🔍 Signature verification debug:");
+      console.log("Message:", JSON.stringify(message));
+      console.log("Expected address:", expectedAddress);
+      console.log("Signature:", signature);
+      
       const recoveredAddress = ethers.verifyMessage(message, signature);
+      console.log("Recovered address:", recoveredAddress);
+      console.log("Addresses match:", recoveredAddress.toLowerCase() === expectedAddress.toLowerCase());
+      
       return recoveredAddress.toLowerCase() === expectedAddress.toLowerCase();
     } catch (error) {
+      console.error("Signature verification error:", error);
       return false;
     }
   }
 
   generateAuthMessage(walletAddress: string, nonce: string): string {
-    return `Sign this message to authenticate with Farcaster Plinko:\n\nWallet: ${walletAddress}\nNonce: ${nonce}\nTime: ${new Date().toISOString()}`;
+    const message = `Sign this message to authenticate with Farcaster Plinko:\n\nWallet: ${walletAddress}\nNonce: ${nonce}`;
+    console.log("📝 Generated auth message:", JSON.stringify(message));
+    return message;
   }
 
   getSignerAddress(): string {
