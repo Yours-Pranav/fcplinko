@@ -9,5 +9,16 @@
       "src": "/(.*)",
       "dest": "dist/index.js"
     }
+  ],
+  "build": {
+    "env": {
+      "NODE_ENV": "production"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/dist/index.js"
+    }
   ]
 }
