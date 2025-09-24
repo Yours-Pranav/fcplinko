@@ -9,7 +9,7 @@ import { PlinkoBoard } from "./components/PlinkoBoard";
 import { WalletConnect } from "./components/WalletConnect";
 import { GameUI } from "./components/GameUI";
 import { VoucherList } from "./components/VoucherList";
-import { useWallet } from "./lib/wallet";
+import { useWallet, WalletProvider } from "./lib/wallet";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -110,7 +110,9 @@ function GameContent() {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <GameContent />
+      <WalletProvider>
+        <GameContent />
+      </WalletProvider>
     </QueryClientProvider>
   );
 }
