@@ -1,0 +1,139 @@
+Project: Farcaster Plinko — Free-ticket, claimable USDC on Arbitrum
+
+Goal
+Build a full-stack Plinko mini-app (Next.js + TypeScript) that runs as a Farcaster frame (or normal web page). Users get **3 free tickets every 24 hours**. Each ticket lets them drop a ball. Each drop yields a random USD reward between **$0.01** and **$1.00** (two-decimal precision). Users can accumulate won USD amounts as **claimable vouchers** and redeem them on Arbitrum **USDC** via an on-chain smart contract.
+
+High-level architecture
+- Frontend: Next.js + TypeScript, uses Farcaster frame-friendly UI (static images + buttons), wallet connect (MetaMask/WalletConnect), shows remaining tickets, drop button, history, and “Claim on chain” flow.
+- Backend: Next.js API routes (or Express inside Next), TypeScript. Handles ticket issuance, drop simulation, prize generation, voucher generation (ECDSA signatures), user history, admin endpoints to top up vault, and auditing.
+- DB: Postgres (Prisma ORM). Redis for fast ticket counters (3 tickets / 24h per user).
+- Blockchain: Solidity smart contract (Hardhat) deployed on Arbitrum. Contract holds USDC and allows redeeming signed vouchers (server-signed). Uses EIP-712 or ECDSA signature verification and nonces to prevent replay.
+- Wallet & libraries: ethers.js for blockchain interactions, node-fetch/axios for server-side, canvas/svg optional for rendering board images.
+
+Functional requirements
+1. No deposits required from users.
+2. Users get **3 free tickets per 24-hour window** (resets every 24 hours).
+   - Ticket logic implemented with Redis key per user: `tickets:{userId}` storing remaining count + TTL.
+   - If user signs in with a wallet address, tickets are tied to wallet address. If auth is via Farcaster handle, tie to handle + wallet mapping.
+3. On “Drop Ball”:
+   - Backend endpoint `/api/drop` validates user auth & ticket availability, consumes one ticket atomically, simulates Plinko path, calculates prize in USD cents (1 to 100 cents).
+   - Prize amounts are deterministic from server PRNG seeded with a server-sided RNG; for fairness, include an optional “proof” method (HMAC of seed published before drop).
+4. When win occurs, backend generates a **voucher** to claim onchain:
+   - Voucher fields: `{ recipient: address, amountCents: number, nonce: string, expiryUnix: number }`
+   - The server signs this voucher using a dedicated **SIGNER_PRIVATE_KEY** (ECDSA) and returns the signed voucher to the user.
+   - Backend stores the voucher record in Postgres with status `issued`.
+5. Claim flow:
+   - The user connects wallet and calls the `redeemVoucher` function on the ClaimVault contract with voucher data and signature.
+   - The contract verifies the signature matches the authorized backend signer and that the voucher was not redeemed before (nonce check), then transfers USDC to `msg.sender`.
+6. Admin:
+   - Admin UI/endpoint to deposit USDC into the ClaimVault and view outstanding vouchers and redemptions.
+   - Admin can change the signer key or pause redemptions.
+7. Safety:
+   - Server must validate wallet address ownership during claim issuance (user must sign a message proving address ownership before backend issues vouchers).
+   - Nonces and expiry to prevent replay.
+   - Rate limits on `/api/drop` to prevent abuse beyond ticket model.
+   - Logging & audit of all vouchers issued.
+
+Deliverables (concrete)
+1. Full Next.js repo (TypeScript) with pages:
+   - `/` Homepage + frame install information and preview.
+   - `/frame` — Farcaster frame endpoint compatible HTML/JSON payload as needed.
+   - `/api/auth/challenge` & `/api/auth/verify` — wallet-sign-in flow (EIP-191 / personal_sign).
+   - `/api/tickets` — GET remaining tickets, POST reset/admin operations.
+   - `/api/drop` — POST to use a ticket and return drop result and voucher (if amount > 0).
+   - `/api/vouchers` — GET user vouchers and statuses (issued/redeemed).
+2. DB schema (Prisma):
+   - `User { id, walletAddress, farcasterHandle?, createdAt }`
+   - `Voucher { id, recipient, amountCents, nonce, expiry, signature, issuedAt, redeemedAt, txHash? }`
+   - `DropHistory { id, userId, amountCents, pathData, createdAt, voucherId? }`
+3. Redis keys:
+   - `tickets:{walletAddress}` = integer (remaining), set TTL 24h when first issued.
+   - Atomic decrement operation on drop.
+4. Smart contract (Solidity) — `ClaimVault.sol`:
+   - Constructor(owner, signerAddress, usdcAddress)
+   - `redeemVoucher(bytes voucherData, bytes signature)` verifies EIP-712 or prefixed hash and `ecrecover` to signerAddress, uses `nonce` mapping to block replays, transfers USDC ERC20 from contract balance to `msg.sender`.
+   - `withdraw` and `deposit` for admin (owner).
+   - `pause`/`unpause`.
+   (Include unit tests in Hardhat.)
+5. Frontend flow:
+   - User connects wallet → signs challenge to prove ownership.
+   - UI shows `remainingTickets` and `Drop Ball` button.
+   - On drop: call `/api/drop`, shows animated/step results (simple image + result).
+   - If voucher returned: show `Claim on Arbitrum` button that links to web3 redemption UI or lets user redeem directly via wallet through `ethers.js`.
+   - Show voucher list with `status` and a `Redeem` button which calls contract.
+6. Security & fairness:
+   - Use server HMAC commit approach if user wants provably-fair: server publishes `dailySeedHash`, later reveals `dailySeed` so drops can be audited using seed + request nonce.
+   - Use HTTPS, store secrets in `.env`:
+     - `SIGNER_PRIVATE_KEY`, `JWT_SECRET`, `DATABASE_URL`, `REDIS_URL`, `USDC_ADDRESS`, `CLAIM_VAULT_ADDRESS`, `RPC_URL_ARBITRUM`, `OWNER_PRIVATE_KEY` (for admin contract interactions).
+7. Tests:
+   - Unit tests for `lib/plinko.ts` randomness and distribution.
+   - Integration tests for `/api/drop` including Redis ticket decrement and voucher issuance.
+   - Hardhat tests for `ClaimVault` verifying signature checks and transfer.
+
+Implementation notes & snippets to include
+- Use `ethers.js` and `hardhat` for contract dev and deployment scripts.
+- Use `Prisma` for DB and migrations.
+- Use `ioredis` for Redis.
+- Use `canvas` (node-canvas) or pre-rendered SVG templates to create board images. Keep images small because Farcaster frames prefer light payloads — optional to just show text + small PNG.
+- Use `jsonwebtoken` or session cookies to authenticate the web user after wallet signature.
+
+Smart contract (example skeleton)
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+
+contract ClaimVault is Ownable {
+    address public signer; // backend signer address
+    IERC20 public usdc;
+    mapping(bytes32 => bool) public redeemed;
+
+    event Redeemed(address indexed to, uint256 amount, bytes32 nonce, bytes signature, bytes32 voucherHash);
+
+    constructor(address _signer, address _usdc) {
+        signer = _signer;
+        usdc = IERC20(_usdc);
+    }
+
+    function setSigner(address _signer) external onlyOwner {
+        signer = _signer;
+    }
+
+    function redeem(uint256 amountCents, address recipient, bytes32 nonce, uint256 expiry, bytes calldata signature) external {
+        require(block.timestamp <= expiry, "Voucher expired");
+        require(recipient == msg.sender, "Recipient mismatch");
+
+        bytes32 voucherHash = keccak256(abi.encodePacked(amountCents, recipient, nonce, expiry, address(this)));
+        require(!redeemed[voucherHash], "Already redeemed");
+
+        // recreate prefixed hash (could use EIP-191 or EIP-712 in production)
+        bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", voucherHash));
+        address recovered = recoverSigner(ethSignedHash, signature);
+        require(recovered == signer, "Invalid signature");
+
+        redeemed[voucherHash] = true;
+
+        uint256 amountTokens = uint256(amountCents) * 1e6 / 1; // USDC on Arbitrum is 6 decimals: cents -> USDC units
+        require(usdc.balanceOf(address(this)) >= amountTokens, "Insufficient funds");
+        usdc.transfer(recipient, amountTokens);
+
+        emit Redeemed(recipient, amountTokens, nonce, signature, voucherHash);
+    }
+
+    function recoverSigner(bytes32 hash, bytes memory sig) internal pure returns (address) {
+        require(sig.length == 65, "Invalid signature length");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := mload(add(sig, 32))
+            s := mload(add(sig, 64))
+            v := byte(0, mload(add(sig, 96)))
+        }
+        if (v < 27) v += 27;
+        return ecrecover(hash, v, r, s);
+    }
+
+    // Admin functions: deposit ERC20 to contract via transfer, withdraw, pause etc.
+}
